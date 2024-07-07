@@ -1,0 +1,8 @@
+[package]
+name = "chess-trainer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bullet = { package = "bullet_lib", version = "1.0.0" }
+rand = "0.8.5"
