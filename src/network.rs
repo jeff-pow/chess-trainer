@@ -1,13 +1,16 @@
+use crate::{dataloader::Dataloader, MEM_LIMIT};
 use bullet::{
     format::{BulletFormat, ChessBoard},
     inputs::{Chess768, InputType},
 };
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
-use std::{fs::File, io::Write, mem::transmute, thread, time::Instant};
+use std::{fs::File, io::Write, mem::transmute, sync::mpsc::sync_channel, time::Instant};
 
 pub const HIDDEN_SIZE: usize = 16;
 pub const CLIP_VALUE: f32 = 100.0; // Gradient clipping threshold
 pub const WEIGHT_CLIP: f32 = 1.98;
+
+pub type FeatureVecs = ([[f32; 768]; 2], f32);
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct Network {
@@ -59,6 +62,7 @@ impl Network {
         }
     }
 
+    #[inline(never)]
     pub fn train(
         &mut self,
         training_data: &mut [ChessBoard],
@@ -75,44 +79,29 @@ impl Network {
                 let _ = out.write(&buf);
             }
             training_data.shuffle(&mut rng);
+            let (sender, receiver) = sync_channel::<Vec<FeatureVecs>>(256);
+            let loader = Dataloader::new(1, training_data.to_vec());
+            loader.run(sender, mini_batch_size);
+            let num_chunks = training_data.len() / mini_batch_size;
+
             let start = Instant::now();
-            for (count, data) in training_data.chunks(mini_batch_size).enumerate() {
+            for count in 0..num_chunks {
+                let data = receiver.recv().unwrap();
                 print!(
                     "\rEpoch {epoch} {:.1}% finished. {} pos / sec",
                     count as f32 * mini_batch_size as f32 / training_data.len() as f32 * 100.,
                     mini_batch_size as f64 * count as f64 / start.elapsed().as_secs_f64()
                 );
-                assert!(self.is_ok());
-                self.update_mini_batch(data, lr);
+                self.update_mini_batch(&data, lr);
             }
             println!();
 
-            assert_ne!(*self, Self::randomized());
             println!("Epoch: {}, Loss: {:.2}%", epoch, self.cost(training_data));
         }
     }
 
-    pub fn is_ok(&self) -> bool {
-        return true;
-        for x in self.feature_weights.iter().flatten() {
-            if !x.is_finite() {
-                return false;
-            }
-        }
-        for x in self.feature_bias.iter() {
-            if !x.is_finite() {
-                return false;
-            }
-        }
-        for x in self.output_weights.iter().flatten() {
-            if !x.is_finite() {
-                return false;
-            }
-        }
-        self.output_bias.is_finite()
-    }
-
-    fn update_mini_batch(&mut self, batch: &[ChessBoard], lr: f32) {
+    #[inline(never)]
+    fn update_mini_batch(&mut self, batch: &[FeatureVecs], lr: f32) {
         let mut changes = vec![Network::zeroed(); batch.len()];
 
         // thread::scope(|s| {
@@ -147,9 +136,9 @@ impl Network {
         }
 
         self.apply_gradients(&unified_changes, lr, batch.len() as f32);
-        assert!(unified_changes.is_ok());
     }
 
+    #[inline(never)]
     fn apply_gradients(&mut self, changes: &Network, lr: f32, batch_size: f32) {
         let lr_batch = lr / batch_size;
 
@@ -182,10 +171,10 @@ impl Network {
         self.output_bias -= lr_batch * changes.output_bias;
         self.output_bias = self.output_bias.clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
 
-        // Gradient clipping
         self.clip_gradients();
     }
 
+    #[inline(never)]
     fn clip_gradients(&mut self) {
         self.feature_weights
             .iter_mut()
@@ -204,8 +193,9 @@ impl Network {
         self.output_bias = self.output_bias.clamp(-CLIP_VALUE, CLIP_VALUE);
     }
 
-    fn backward(&self, board: &ChessBoard) -> Self {
-        let input_layer = extract_features(board);
+    #[inline(never)]
+    fn backward(&self, board: &FeatureVecs) -> Self {
+        let input_layer = board.0;
 
         let mut hl = [self.feature_bias; 2];
         for i in 0..768 {
@@ -227,22 +217,19 @@ impl Network {
             output_z += self.output_weights[XSTM][i] * hl_activate[XSTM][i];
         }
         let output_activate = output_z;
-        assert!(self.is_ok());
 
         let mut deltas = Network::zeroed();
 
         //
         // Backwards Pass
         //
-        let output_delta = (output_activate - board.score() as f32) * output_z;
+        let output_delta = (output_activate - board.1) * output_z;
         deltas.output_bias = output_delta;
-        assert!(deltas.is_ok());
 
         for i in 0..HIDDEN_SIZE {
             deltas.output_weights[STM][i] = output_delta * hl_activate[STM][i];
             deltas.output_weights[XSTM][i] = output_delta * hl_activate[XSTM][i];
         }
-        assert!(deltas.is_ok());
 
         let z = hl_z;
         let sp = {
@@ -265,28 +252,15 @@ impl Network {
                 deltas.feature_weights[i][j] += delta_dot_sp[XSTM][j] * input_layer[XSTM][i];
             }
         }
-        assert!(deltas.is_ok());
 
         for i in 0..HIDDEN_SIZE {
             deltas.feature_bias[i] = delta_dot_sp[STM][i] + delta_dot_sp[XSTM][i];
         }
 
-        // if output_activate == board.score() as f32 {
-        //     assert_eq!(deltas, Self::zeroed());
-        // } else {
-        //     assert_ne!(
-        //         deltas,
-        //         Self::zeroed(),
-        //         "output_activate: {}, score: {}",
-        //         output_activate,
-        //         board.score() as f32
-        //     );
-        // }
-        assert!(deltas.is_ok());
-
         deltas
     }
 
+    #[inline(never)]
     // Double vertical bars denoting the magnitude of the vector
     /// Cost = 1 / 2n * sum (||(prediction - actual)|| ** 2)
     pub fn cost(&self, test_data: &[ChessBoard]) -> f32 {
@@ -301,6 +275,7 @@ impl Network {
             / test_data.len() as f32
     }
 
+    #[inline(never)]
     pub fn loss(&self, test_data: &[ChessBoard]) -> f32 {
         0.5 * test_data
             .iter()
@@ -312,6 +287,7 @@ impl Network {
             .sum::<f32>()
     }
 
+    #[inline(never)]
     pub fn feed_forward(&self, data: &ChessBoard) -> f32 {
         let features = extract_features(data);
         //hl = b
@@ -331,6 +307,7 @@ impl Network {
     }
 }
 
+#[inline(never)]
 fn sparse_matmul(
     weights: &[[f32; HIDDEN_SIZE]; 768],
     feature_vec: &[[f32; 768]; 2],
@@ -365,14 +342,40 @@ pub fn extract_features(data: &ChessBoard) -> [[f32; 768]; 2] {
     features
 }
 
+#[inline(never)]
 pub fn activate(x: f32) -> f32 {
     x.clamp(0., 1.).powi(2)
 }
 
+#[inline(never)]
 pub fn prime(x: f32) -> f32 {
     if x > 0.0 && x < 1.0 {
         2.0 * x
     } else {
         0.0
+    }
+}
+
+#[inline(never)]
+fn apply_change(changes: &[Network], unified_changes: &mut Network) {
+    for net in changes {
+        unified_changes
+            .feature_weights
+            .iter_mut()
+            .flatten()
+            .zip(net.feature_weights.iter().flatten())
+            .for_each(|(w, nw)| *w += nw);
+        unified_changes
+            .feature_bias
+            .iter_mut()
+            .zip(net.feature_bias.iter())
+            .for_each(|(w, nw)| *w += nw);
+        unified_changes
+            .output_weights
+            .iter_mut()
+            .flatten()
+            .zip(net.output_weights.iter().flatten())
+            .for_each(|(w, nw)| *w += nw);
+        unified_changes.output_bias += net.output_bias;
     }
 }
