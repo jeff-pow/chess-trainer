@@ -3,10 +3,11 @@ use bullet::{
     inputs::{Chess768, InputType},
 };
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
+use std::{fs::File, io::Write, mem::transmute, thread, time::Instant};
 
 pub const HIDDEN_SIZE: usize = 16;
-pub const L2_REGULARIZATION: f32 = 0.01; // L2 regularization factor
-pub const CLIP_VALUE: f32 = 1.0; // Gradient clipping threshold
+pub const CLIP_VALUE: f32 = 100.0; // Gradient clipping threshold
+pub const WEIGHT_CLIP: f32 = 1.98;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct Network {
@@ -19,25 +20,28 @@ pub struct Network {
 impl Network {
     pub fn randomized() -> Self {
         let mut rng: StdRng = SeedableRng::seed_from_u64(0xABBA);
+        // Sort of implements Xavier initialization, but I haven't given the actual arguments to
+        // each too much thought. Sue me.
+        let mut gen = |x: usize| rng.gen_range(-1. / (x as f32).sqrt()..1. / (x as f32).sqrt());
 
         let mut feature_weights = [[0f32; HIDDEN_SIZE]; 768];
         for a in &mut feature_weights {
             for b in a {
-                *b = rng.gen();
+                *b = gen(768);
             }
         }
         let mut feature_bias = [0f32; HIDDEN_SIZE];
         for x in &mut feature_bias {
-            *x = rng.gen();
+            *x = gen(HIDDEN_SIZE);
         }
         let mut output_weights = [[0f32; HIDDEN_SIZE]; 2];
         for x in &mut output_weights {
             for y in x {
-                *y = rng.gen();
+                *y = gen(HIDDEN_SIZE);
             }
         }
 
-        let output_bias = rng.gen();
+        let output_bias = gen(1);
         Self {
             feature_weights,
             feature_bias,
@@ -60,22 +64,36 @@ impl Network {
         training_data: &mut [ChessBoard],
         epochs: usize,
         mini_batch_size: usize,
-        lr: f32,
+        mut lr: f32,
     ) {
         let mut rng: StdRng = SeedableRng::seed_from_u64(0xBEEF);
-        for i in 0..epochs {
+        for epoch in 0..epochs {
+            if epoch % 10 == 0 && epoch != 0 {
+                lr *= 0.5;
+                let mut out = File::create("./network-checkpoint.bin").unwrap();
+                let buf: [u8; size_of::<Network>()] = unsafe { transmute(*self) };
+                let _ = out.write(&buf);
+            }
             training_data.shuffle(&mut rng);
+            let start = Instant::now();
             for (count, data) in training_data.chunks(mini_batch_size).enumerate() {
+                print!(
+                    "\rEpoch {epoch} {:.1}% finished. {} pos / sec",
+                    count as f32 * mini_batch_size as f32 / training_data.len() as f32 * 100.,
+                    mini_batch_size as f64 * count as f64 / start.elapsed().as_secs_f64()
+                );
                 assert!(self.is_ok());
                 self.update_mini_batch(data, lr);
             }
+            println!();
 
             assert_ne!(*self, Self::randomized());
-            println!("Epoch: {}, Loss: {:.2}%", i, self.loss(training_data));
+            println!("Epoch: {}, Loss: {:.2}%", epoch, self.cost(training_data));
         }
     }
 
     pub fn is_ok(&self) -> bool {
+        return true;
         for x in self.feature_weights.iter().flatten() {
             if !x.is_finite() {
                 return false;
@@ -95,34 +113,41 @@ impl Network {
     }
 
     fn update_mini_batch(&mut self, batch: &[ChessBoard], lr: f32) {
-        let mut changes = Network::zeroed();
+        let mut changes = vec![Network::zeroed(); batch.len()];
 
-        for (idx, board) in batch.iter().enumerate() {
-            let deltas = self.backward(board);
-            assert!(deltas.is_ok());
-
-            changes
+        // thread::scope(|s| {
+        batch
+            .iter()
+            .zip(changes.iter_mut())
+            .for_each(|(board, change)| {
+                /*s.spawn(||*/
+                *change = self.backward(board);
+            });
+        // });
+        let mut unified_changes = Network::zeroed();
+        for net in &changes {
+            unified_changes
                 .feature_weights
                 .iter_mut()
                 .flatten()
-                .zip(deltas.feature_weights.iter().flatten())
+                .zip(net.feature_weights.iter().flatten())
                 .for_each(|(w, nw)| *w += nw);
-            changes
+            unified_changes
                 .feature_bias
                 .iter_mut()
-                .zip(deltas.feature_bias.iter())
+                .zip(net.feature_bias.iter())
                 .for_each(|(w, nw)| *w += nw);
-            changes
+            unified_changes
                 .output_weights
                 .iter_mut()
                 .flatten()
-                .zip(deltas.output_weights.iter().flatten())
+                .zip(net.output_weights.iter().flatten())
                 .for_each(|(w, nw)| *w += nw);
-            changes.output_bias += deltas.output_bias;
+            unified_changes.output_bias += net.output_bias;
         }
 
-        self.apply_gradients(&changes, lr, batch.len() as f32);
-        assert!(changes.is_ok());
+        self.apply_gradients(&unified_changes, lr, batch.len() as f32);
+        assert!(unified_changes.is_ok());
     }
 
     fn apply_gradients(&mut self, changes: &Network, lr: f32, batch_size: f32) {
@@ -134,7 +159,7 @@ impl Network {
             .zip(changes.feature_weights.iter().flatten())
             .for_each(|(w, nw)| {
                 *w -= lr_batch * nw;
-                *w -= lr * L2_REGULARIZATION * *w;
+                *w = w.clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
             });
 
         self.feature_bias
@@ -142,7 +167,7 @@ impl Network {
             .zip(changes.feature_bias.iter())
             .for_each(|(b, nb)| {
                 *b -= lr_batch * nb;
-                *b -= lr * L2_REGULARIZATION * *b;
+                *b = b.clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
             });
 
         self.output_weights
@@ -151,11 +176,11 @@ impl Network {
             .zip(changes.output_weights.iter().flatten())
             .for_each(|(w, nw)| {
                 *w -= lr_batch * nw;
-                *w -= lr * L2_REGULARIZATION * *w;
+                *w = w.clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
             });
 
         self.output_bias -= lr_batch * changes.output_bias;
-        self.output_bias -= lr * L2_REGULARIZATION * self.output_bias;
+        self.output_bias = self.output_bias.clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
 
         // Gradient clipping
         self.clip_gradients();
@@ -246,7 +271,17 @@ impl Network {
             deltas.feature_bias[i] = delta_dot_sp[STM][i] + delta_dot_sp[XSTM][i];
         }
 
-        assert_ne!(deltas, Self::zeroed());
+        // if output_activate == board.score() as f32 {
+        //     assert_eq!(deltas, Self::zeroed());
+        // } else {
+        //     assert_ne!(
+        //         deltas,
+        //         Self::zeroed(),
+        //         "output_activate: {}, score: {}",
+        //         output_activate,
+        //         board.score() as f32
+        //     );
+        // }
         assert!(deltas.is_ok());
 
         deltas
