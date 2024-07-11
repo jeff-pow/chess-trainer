@@ -1,7 +1,11 @@
 use crate::network::{extract_features, FeatureVecs};
 use bullet::format::{BulletFormat, ChessBoard};
 use std::{
-    sync::mpsc::SyncSender,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::SyncSender,
+        Arc,
+    },
     thread::{self, JoinHandle},
 };
 
@@ -22,17 +26,25 @@ impl Dataloader {
         &self,
         sender: SyncSender<Vec<FeatureVecs>>,
         mini_batch_size: usize,
+        stop: Arc<AtomicBool>,
     ) -> JoinHandle<()> {
         let c = self.raw_data.clone();
         thread::spawn(move || {
             let mut iter = c.iter().cycle();
             loop {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
                 let vec = iter
                     .by_ref()
                     .take(mini_batch_size)
                     .map(|b| (extract_features(b), b.score() as f32))
                     .collect::<Vec<_>>();
-                while sender.send(vec.clone()).is_err() {}
+                while sender.send(vec.clone()).is_err() {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                }
             }
         })
     }

@@ -1,10 +1,20 @@
-use crate::{dataloader::Dataloader, MEM_LIMIT};
+use crate::dataloader::Dataloader;
 use bullet::{
     format::{BulletFormat, ChessBoard},
     inputs::{Chess768, InputType},
 };
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
-use std::{fs::File, io::Write, mem::transmute, sync::mpsc::sync_channel, time::Instant};
+use std::{
+    fs::File,
+    io::Write,
+    mem::transmute,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::sync_channel,
+        Arc,
+    },
+    time::Instant,
+};
 
 pub const HIDDEN_SIZE: usize = 16;
 pub const CLIP_VALUE: f32 = 100.0; // Gradient clipping threshold
@@ -13,6 +23,7 @@ pub const WEIGHT_CLIP: f32 = 1.98;
 pub type FeatureVecs = ([[f32; 768]; 2], f32);
 
 #[derive(Debug, PartialEq, Clone, Copy)]
+#[repr(align(64))]
 pub struct Network {
     pub feature_weights: [[f32; HIDDEN_SIZE]; 768],
     pub feature_bias: [f32; HIDDEN_SIZE],
@@ -62,7 +73,6 @@ impl Network {
         }
     }
 
-    #[inline(never)]
     pub fn train(
         &mut self,
         training_data: &mut [ChessBoard],
@@ -81,7 +91,8 @@ impl Network {
             training_data.shuffle(&mut rng);
             let (sender, receiver) = sync_channel::<Vec<FeatureVecs>>(256);
             let loader = Dataloader::new(1, training_data.to_vec());
-            loader.run(sender, mini_batch_size);
+            let stop = Arc::new(AtomicBool::new(false));
+            let handle = loader.run(sender, mini_batch_size, stop.clone());
             let num_chunks = training_data.len() / mini_batch_size;
 
             let start = Instant::now();
@@ -90,55 +101,27 @@ impl Network {
                 print!(
                     "\rEpoch {epoch} {:.1}% finished. {} pos / sec",
                     count as f32 * mini_batch_size as f32 / training_data.len() as f32 * 100.,
-                    mini_batch_size as f64 * count as f64 / start.elapsed().as_secs_f64()
+                    count as f64 * mini_batch_size as f64 / start.elapsed().as_secs_f64()
                 );
                 self.update_mini_batch(&data, lr);
             }
             println!();
+            stop.store(true, Ordering::Relaxed);
+            drop(handle);
 
-            println!("Epoch: {}, Loss: {:.2}%", epoch, self.cost(training_data));
+            println!("Epoch: {}, Cost: {:.2}", epoch, self.cost(training_data));
         }
     }
 
-    #[inline(never)]
     fn update_mini_batch(&mut self, batch: &[FeatureVecs], lr: f32) {
-        let mut changes = vec![Network::zeroed(); batch.len()];
-
-        // thread::scope(|s| {
-        batch
-            .iter()
-            .zip(changes.iter_mut())
-            .for_each(|(board, change)| {
-                /*s.spawn(||*/
-                *change = self.backward(board);
-            });
-        // });
         let mut unified_changes = Network::zeroed();
-        for net in &changes {
-            unified_changes
-                .feature_weights
-                .iter_mut()
-                .flatten()
-                .zip(net.feature_weights.iter().flatten())
-                .for_each(|(w, nw)| *w += nw);
-            unified_changes
-                .feature_bias
-                .iter_mut()
-                .zip(net.feature_bias.iter())
-                .for_each(|(w, nw)| *w += nw);
-            unified_changes
-                .output_weights
-                .iter_mut()
-                .flatten()
-                .zip(net.output_weights.iter().flatten())
-                .for_each(|(w, nw)| *w += nw);
-            unified_changes.output_bias += net.output_bias;
-        }
+        batch.iter().for_each(|board| {
+            self.backward(board, &mut unified_changes);
+        });
 
         self.apply_gradients(&unified_changes, lr, batch.len() as f32);
     }
 
-    #[inline(never)]
     fn apply_gradients(&mut self, changes: &Network, lr: f32, batch_size: f32) {
         let lr_batch = lr / batch_size;
 
@@ -174,7 +157,6 @@ impl Network {
         self.clip_gradients();
     }
 
-    #[inline(never)]
     fn clip_gradients(&mut self) {
         self.feature_weights
             .iter_mut()
@@ -193,17 +175,17 @@ impl Network {
         self.output_bias = self.output_bias.clamp(-CLIP_VALUE, CLIP_VALUE);
     }
 
-    #[inline(never)]
-    fn backward(&self, board: &FeatureVecs) -> Self {
+    fn backward(&self, board: &FeatureVecs, deltas: &mut Self) {
         let input_layer = board.0;
 
         let mut hl = [self.feature_bias; 2];
-        for i in 0..768 {
-            for j in 0..HIDDEN_SIZE {
-                hl[STM][j] += self.feature_weights[i][j] * input_layer[STM][i];
-                hl[XSTM][j] += self.feature_weights[i][j] * input_layer[XSTM][i];
-            }
-        }
+        sparse_matmul(&self.feature_weights, &input_layer, &mut hl);
+        // for i in 0..768 {
+        //     for j in 0..HIDDEN_SIZE {
+        //         hl[STM][j] += self.feature_weights[i][j] * input_layer[STM][i];
+        //         hl[XSTM][j] += self.feature_weights[i][j] * input_layer[XSTM][i];
+        //     }
+        // }
         let hl_z = hl;
         let hl_activate = {
             let mut arr = hl;
@@ -218,17 +200,15 @@ impl Network {
         }
         let output_activate = output_z;
 
-        let mut deltas = Network::zeroed();
-
         //
         // Backwards Pass
         //
         let output_delta = (output_activate - board.1) * output_z;
-        deltas.output_bias = output_delta;
+        deltas.output_bias += output_delta;
 
         for i in 0..HIDDEN_SIZE {
-            deltas.output_weights[STM][i] = output_delta * hl_activate[STM][i];
-            deltas.output_weights[XSTM][i] = output_delta * hl_activate[XSTM][i];
+            deltas.output_weights[STM][i] += output_delta * hl_activate[STM][i];
+            deltas.output_weights[XSTM][i] += output_delta * hl_activate[XSTM][i];
         }
 
         let z = hl_z;
@@ -248,19 +228,16 @@ impl Network {
 
         for i in 0..768 {
             for j in 0..HIDDEN_SIZE {
-                deltas.feature_weights[i][j] = delta_dot_sp[STM][j] * input_layer[STM][i];
+                deltas.feature_weights[i][j] += delta_dot_sp[STM][j] * input_layer[STM][i];
                 deltas.feature_weights[i][j] += delta_dot_sp[XSTM][j] * input_layer[XSTM][i];
             }
         }
 
         for i in 0..HIDDEN_SIZE {
-            deltas.feature_bias[i] = delta_dot_sp[STM][i] + delta_dot_sp[XSTM][i];
+            deltas.feature_bias[i] += delta_dot_sp[STM][i] + delta_dot_sp[XSTM][i];
         }
-
-        deltas
     }
 
-    #[inline(never)]
     // Double vertical bars denoting the magnitude of the vector
     /// Cost = 1 / 2n * sum (||(prediction - actual)|| ** 2)
     pub fn cost(&self, test_data: &[ChessBoard]) -> f32 {
@@ -275,19 +252,6 @@ impl Network {
             / test_data.len() as f32
     }
 
-    #[inline(never)]
-    pub fn loss(&self, test_data: &[ChessBoard]) -> f32 {
-        0.5 * test_data
-            .iter()
-            .map(|board| {
-                let y = board.score() as f32;
-                let prediction = self.feed_forward(board);
-                (y - prediction).powi(2)
-            })
-            .sum::<f32>()
-    }
-
-    #[inline(never)]
     pub fn feed_forward(&self, data: &ChessBoard) -> f32 {
         let features = extract_features(data);
         //hl = b
@@ -307,7 +271,6 @@ impl Network {
     }
 }
 
-#[inline(never)]
 fn sparse_matmul(
     weights: &[[f32; HIDDEN_SIZE]; 768],
     feature_vec: &[[f32; 768]; 2],
@@ -342,40 +305,14 @@ pub fn extract_features(data: &ChessBoard) -> [[f32; 768]; 2] {
     features
 }
 
-#[inline(never)]
 pub fn activate(x: f32) -> f32 {
     x.clamp(0., 1.).powi(2)
 }
 
-#[inline(never)]
 pub fn prime(x: f32) -> f32 {
     if x > 0.0 && x < 1.0 {
         2.0 * x
     } else {
         0.0
-    }
-}
-
-#[inline(never)]
-fn apply_change(changes: &[Network], unified_changes: &mut Network) {
-    for net in changes {
-        unified_changes
-            .feature_weights
-            .iter_mut()
-            .flatten()
-            .zip(net.feature_weights.iter().flatten())
-            .for_each(|(w, nw)| *w += nw);
-        unified_changes
-            .feature_bias
-            .iter_mut()
-            .zip(net.feature_bias.iter())
-            .for_each(|(w, nw)| *w += nw);
-        unified_changes
-            .output_weights
-            .iter_mut()
-            .flatten()
-            .zip(net.output_weights.iter().flatten())
-            .for_each(|(w, nw)| *w += nw);
-        unified_changes.output_bias += net.output_bias;
     }
 }

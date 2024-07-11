@@ -4,6 +4,7 @@ const QA: i32 = 255;
 const QB: i32 = 64;
 const QAB: i32 = QA * QB;
 
+#[repr(align(64))]
 pub struct QuantizedNetwork {
     pub feature_weights: [[i16; HIDDEN_SIZE]; 768],
     pub feature_bias: [i16; HIDDEN_SIZE],

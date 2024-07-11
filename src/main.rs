@@ -1,5 +1,6 @@
 use bullet::format::ChessBoard;
 use network::Network;
+use quantize::QuantizedNetwork;
 use std::{
     fs::File,
     io::{BufReader, Read, Write},
@@ -19,8 +20,7 @@ pub const MEM_LIMIT: usize = 3000 * 1024 * 1024;
 fn main() {
     // let net: Network = unsafe { transmute(*include_bytes!("../network.bin")) };
     let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 | 0 | 0.0";
-    let b = ChessBoard::from_str(fen).unwrap();
-    // dbg!(net.feed_forward(&b));
+    let start_pos = ChessBoard::from_str(fen).unwrap();
 
     let mut data = vec![];
     let mut buffer = [0u8; 32];
@@ -41,5 +41,11 @@ fn main() {
     net.train(&mut data, 50, 100, 0.1);
     let mut out = File::create("./network.bin").unwrap();
     let buf: [u8; size_of::<Network>()] = unsafe { transmute(net) };
+    let _ = out.write(&buf);
+
+    dbg!(net.feed_forward(&start_pos));
+    let quantized = QuantizedNetwork::new(&net);
+    let mut out = File::create("./quantized-network.bin").unwrap();
+    let buf: [u8; size_of::<QuantizedNetwork>()] = unsafe { transmute(quantized) };
     let _ = out.write(&buf);
 }
