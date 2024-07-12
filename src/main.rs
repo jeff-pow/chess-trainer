@@ -18,7 +18,6 @@ mod vector;
 pub const MEM_LIMIT: usize = 3000 * 1024 * 1024;
 
 fn main() {
-    // let net: Network = unsafe { transmute(*include_bytes!("../network.bin")) };
     let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 | 0 | 0.0";
     let start_pos = ChessBoard::from_str(fen).unwrap();
 
@@ -38,12 +37,12 @@ fn main() {
     }
 
     let mut net = Network::randomized();
-    net.train(&mut data, 50, 100, 0.1);
+    net.train(&mut data, 50, 100, 0.001);
     let mut out = File::create("./network.bin").unwrap();
     let buf: [u8; size_of::<Network>()] = unsafe { transmute(net) };
     let _ = out.write(&buf);
 
-    dbg!(net.feed_forward(&start_pos));
+    dbg!(net.evaluate(&start_pos));
     let quantized = QuantizedNetwork::new(&net);
     let mut out = File::create("./quantized-network.bin").unwrap();
     let buf: [u8; size_of::<QuantizedNetwork>()] = unsafe { transmute(quantized) };

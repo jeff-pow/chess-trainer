@@ -1,4 +1,7 @@
-use crate::network::{activate, Network, HIDDEN_SIZE};
+use crate::{
+    dataloader::{STM, XSTM},
+    network::{activate, Network, HIDDEN_SIZE},
+};
 use bullet::{
     format::ChessBoard,
     inputs::{Chess768, InputType},
@@ -9,15 +12,19 @@ use bullet::{
 /// here like it is in a chess engine, but I find it makes it easier to think about and take
 /// advantage of the sparse nature of the input layer
 pub struct Accumulator {
-    pub stm: [f32; HIDDEN_SIZE],
-    pub xstm: [f32; HIDDEN_SIZE],
+    pub data: [[f32; HIDDEN_SIZE]; 2],
 }
 
 impl Accumulator {
     pub fn new(net: &Network) -> Self {
         Self {
-            stm: net.feature_bias,
-            xstm: net.feature_bias,
+            data: [net.feature_bias; 2],
+        }
+    }
+
+    pub fn zeroed() -> Self {
+        Self {
+            data: [[0.; HIDDEN_SIZE]; 2],
         }
     }
 
@@ -31,11 +38,11 @@ impl Accumulator {
     }
 
     pub fn add(&mut self, net: &Network, stm_feature_idx: usize, xstm_feature_idx: usize) {
-        self.stm
+        self.data[STM]
             .iter_mut()
             .zip(&net.feature_weights[stm_feature_idx])
             .for_each(|(x, &w)| *x += w);
-        self.xstm
+        self.data[XSTM]
             .iter_mut()
             .zip(&net.feature_weights[xstm_feature_idx])
             .for_each(|(x, &w)| *x += w);
@@ -43,11 +50,11 @@ impl Accumulator {
 
     pub fn flatten(&self, net: &Network) -> f32 {
         let mut sum = net.output_bias;
-        self.stm
+        self.data[STM]
             .iter()
             .zip(&net.output_weights[0])
             .for_each(|(&x, &w)| sum += activate(x) * w);
-        self.xstm
+        self.data[XSTM]
             .iter()
             .zip(&net.output_weights[1])
             .for_each(|(&x, &w)| sum += activate(x) * w);
