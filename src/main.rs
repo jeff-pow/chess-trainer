@@ -18,7 +18,7 @@ mod vector;
 pub const MEM_LIMIT: usize = 3000 * 1024 * 1024;
 
 fn main() {
-    let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 | 0 | 0.0";
+    let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 | 33 | 0.5";
     let start_pos = ChessBoard::from_str(fen).unwrap();
 
     let mut data = vec![];
@@ -28,7 +28,7 @@ fn main() {
     loop {
         fp.read_exact(&mut buffer).unwrap();
         data.push(unsafe { transmute::<[u8; 32], ChessBoard>(buffer) });
-        if data.len() > 16_000_000 {
+        if data.len() > 32_000_000 {
             break;
         }
         if data.len() * size_of::<ChessBoard>() > MEM_LIMIT {
@@ -37,7 +37,8 @@ fn main() {
     }
 
     let mut net = Network::randomized();
-    net.train(&mut data, 50, 100, 0.001);
+    net.train(&mut data, 1000, 100, 0.001);
+    net.print_max_and_min();
     let mut out = File::create("./network.bin").unwrap();
     let buf: [u8; size_of::<Network>()] = unsafe { transmute(net) };
     let _ = out.write(&buf);

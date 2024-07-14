@@ -52,11 +52,11 @@ impl Accumulator {
         let mut sum = net.output_bias;
         self.data[STM]
             .iter()
-            .zip(&net.output_weights[0])
+            .zip(&net.output_weights[STM])
             .for_each(|(&x, &w)| sum += activate(x) * w);
         self.data[XSTM]
             .iter()
-            .zip(&net.output_weights[1])
+            .zip(&net.output_weights[XSTM])
             .for_each(|(&x, &w)| sum += activate(x) * w);
         sum
     }

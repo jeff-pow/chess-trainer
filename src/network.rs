@@ -3,25 +3,13 @@ use crate::{
     dataloader::{Dataloader, FeatureSet, SCALE, STM, XSTM},
 };
 use bullet::{
-    format::{BulletFormat, ChessBoard},
+    format::ChessBoard,
     inputs::{Chess768, InputType},
 };
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
-use std::{
-    fs::File,
-    io::Write,
-    mem::transmute,
-    str::FromStr,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc::sync_channel,
-        Arc,
-    },
-    time::Instant,
-};
+use std::{fs::File, io::Write, mem::transmute, sync::mpsc::sync_channel, time::Instant};
 
 pub const HIDDEN_SIZE: usize = 16;
-pub const CLIP_VALUE: f32 = 100.0; // Gradient clipping threshold
 pub const WEIGHT_CLIP: f32 = 1.98;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -44,20 +32,24 @@ impl Network {
         for a in &mut feature_weights {
             for b in a {
                 *b = gen(768 * HIDDEN_SIZE);
+                *b *= -1.;
             }
         }
         let mut feature_bias = [0f32; HIDDEN_SIZE];
         for x in &mut feature_bias {
             *x = gen(HIDDEN_SIZE);
+            *x *= -1.;
         }
         let mut output_weights = [[0f32; HIDDEN_SIZE]; 2];
         for x in &mut output_weights {
             for y in x {
                 *y = gen(HIDDEN_SIZE * 2);
+                *y *= -1.;
             }
         }
 
-        let output_bias = gen(1);
+        let mut output_bias = gen(1);
+        output_bias *= -1.;
         Self {
             feature_weights,
             feature_bias,
@@ -85,19 +77,18 @@ impl Network {
         let mut rng: StdRng = SeedableRng::seed_from_u64(0xBEEF);
         for epoch in 0..epochs {
             if epoch % 10 == 0 && epoch != 0 {
-                lr *= 0.5;
+                lr *= 0.7;
                 let mut out = File::create("./network-checkpoint.bin").unwrap();
                 let buf: [u8; size_of::<Network>()] = unsafe { transmute(*self) };
                 let _ = out.write(&buf);
             }
             training_data.shuffle(&mut rng);
+
             let (sender, receiver) = sync_channel::<Vec<FeatureSet>>(256);
             let loader = Dataloader::new(1, training_data.to_vec());
-            let stop = Arc::new(AtomicBool::new(false));
             let num_chunks = training_data.len() / mini_batch_size;
             let mut error = 0.;
-            let data_loader_handle =
-                loader.run(sender.clone(), mini_batch_size, stop.clone(), num_chunks);
+            let data_loader_handle = loader.run(sender.clone(), mini_batch_size, num_chunks);
 
             let start = Instant::now();
             for count in 0..num_chunks {
@@ -110,13 +101,13 @@ impl Network {
                 self.update_mini_batch(&data, lr, &mut error);
             }
             println!();
-            stop.store(true, Ordering::Relaxed);
             data_loader_handle.join().unwrap();
 
             println!(
-                "Epoch: {}, Error: {:.6}",
+                "Epoch: {}, Error: {:.6}, Evaluation: {}",
                 epoch,
-                error / training_data.len() as f64
+                error / training_data.len() as f64,
+                self.evaluate(&training_data[0])
             );
         }
     }
@@ -161,26 +152,39 @@ impl Network {
 
         self.output_bias -= lr_batch * changes.output_bias;
         self.output_bias = self.output_bias.clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
-
-        self.clip_gradients();
     }
 
-    fn clip_gradients(&mut self) {
-        self.feature_weights
-            .iter_mut()
-            .flatten()
-            .for_each(|w| *w = w.clamp(-CLIP_VALUE, CLIP_VALUE));
+    pub fn print_max_and_min(&self) {
+        let mut feature_weight_max = f32::MIN;
+        let mut feature_weight_min = f32::MAX;
+        for &w in self.feature_weights.iter().flatten() {
+            feature_weight_min = w.min(feature_weight_min);
+            feature_weight_max = w.max(feature_weight_max);
+        }
 
-        self.feature_bias
-            .iter_mut()
-            .for_each(|b| *b = b.clamp(-CLIP_VALUE, CLIP_VALUE));
+        let mut feature_bias_max = f32::MIN;
+        let mut feature_bias_min = f32::MAX;
+        for &w in self.feature_bias.iter() {
+            feature_bias_min = w.min(feature_bias_min);
+            feature_bias_max = w.max(feature_bias_max);
+        }
 
-        self.output_weights
-            .iter_mut()
-            .flatten()
-            .for_each(|w| *w = w.clamp(-CLIP_VALUE, CLIP_VALUE));
+        let mut output_weight_max = f32::MIN;
+        let mut output_weight_min = f32::MAX;
+        for &w in self.output_weights.iter().flatten() {
+            output_weight_min = w.min(feature_weight_min);
+            output_weight_max = w.max(feature_weight_max);
+        }
 
-        self.output_bias = self.output_bias.clamp(-CLIP_VALUE, CLIP_VALUE);
+        dbg!(
+            feature_weight_min,
+            feature_weight_max,
+            feature_bias_min,
+            feature_bias_max,
+            output_weight_min,
+            output_weight_max,
+            self.output_bias
+        );
     }
 
     fn backward(&self, board: &FeatureSet, deltas: &mut Self, error: &mut f64) {
@@ -209,8 +213,8 @@ impl Network {
         //
         // Backwards Pass
         //
-        let output_delta = (eval - board.blended_score).powi(2);
-        *error += f64::from(output_delta);
+        let output_delta = eval - board.blended_score;
+        *error += f64::from(output_delta.powi(2));
         deltas.output_bias += output_delta;
 
         for i in 0..HIDDEN_SIZE {
@@ -248,6 +252,7 @@ impl Network {
         }
     }
 
+    /// Feed forward evaluation including wdl scale
     pub fn evaluate(&self, board: &ChessBoard) -> f32 {
         let mut acc = Accumulator::new(self);
         let chess_768 = Chess768;

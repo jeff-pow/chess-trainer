@@ -4,20 +4,17 @@ use bullet::{
     inputs::{Chess768, InputType},
 };
 use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc::SyncSender,
-        Arc,
-    },
+    sync::mpsc::SyncSender,
     thread::{self, JoinHandle},
 };
 pub const STM: usize = 0;
 pub const XSTM: usize = 1;
 
+pub const RECIPROCAL_SCALE: f32 = 1. / SCALE;
 pub const SCALE: f32 = 400.;
 pub const ALPHA: f32 = 0.10;
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct FeatureSet {
     pub features: [ArrayVec<usize, 32>; 2],
     pub blended_score: f32,
@@ -40,7 +37,6 @@ impl Dataloader {
         &self,
         sender: SyncSender<Vec<FeatureSet>>,
         mini_batch_size: usize,
-        stop: Arc<AtomicBool>,
         num_batches: usize,
     ) -> JoinHandle<()> {
         let c = self.raw_data.clone();
@@ -48,9 +44,6 @@ impl Dataloader {
             let mut iter = c.iter();
 
             for _ in 0..num_batches {
-                if stop.load(Ordering::Relaxed) {
-                    return;
-                }
                 let vec = iter
                     .by_ref()
                     .take(mini_batch_size)
@@ -61,7 +54,7 @@ impl Dataloader {
                             features.features[STM].push(stm_idx);
                             features.features[XSTM].push(xstm_idx);
                         }
-                        features.blended_score = board.blended_result(ALPHA, SCALE);
+                        features.blended_score = board.blended_result(ALPHA, RECIPROCAL_SCALE);
                         features
                     })
                     .collect::<Vec<_>>();
