@@ -1,8 +1,5 @@
 use arrayvec::ArrayVec;
-use bullet::{
-    format::{BulletFormat, ChessBoard},
-    inputs::{Chess768, InputType},
-};
+use bulletformat::{BulletFormat, ChessBoard};
 use std::{
     sync::mpsc::SyncSender,
     thread::{self, JoinHandle},
@@ -49,8 +46,8 @@ impl Dataloader {
                     .take(mini_batch_size)
                     .map(|board| {
                         let mut features = FeatureSet::default();
-                        let chess_768 = Chess768;
-                        for (stm_idx, xstm_idx) in chess_768.feature_iter(board) {
+                        for (piece, square) in board.into_iter() {
+                            let (stm_idx, xstm_idx) = feature_extract(piece, square);
                             features.features[STM].push(stm_idx);
                             features.features[XSTM].push(xstm_idx);
                         }
@@ -62,4 +59,13 @@ impl Dataloader {
             }
         })
     }
+}
+
+pub fn feature_extract(piece: u8, square: u8) -> (usize, usize) {
+    let c = usize::from(piece & 8 > 0);
+    let pc = 64 * usize::from(piece & 7);
+    let sq = usize::from(square);
+    let stm_idx = [0, 384][c] + pc + sq;
+    let xstm_idx = [384, 0][c] + pc + (sq ^ 56);
+    (stm_idx, xstm_idx)
 }

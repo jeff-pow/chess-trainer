@@ -4,7 +4,7 @@ const QA: i32 = 255;
 const QB: i32 = 64;
 const QAB: i32 = QA * QB;
 
-#[repr(align(64))]
+#[repr(C, align(64))]
 pub struct QuantizedNetwork {
     pub feature_weights: [[i16; HIDDEN_SIZE]; 768],
     pub feature_bias: [i16; HIDDEN_SIZE],
@@ -40,7 +40,7 @@ impl QuantizedNetwork {
             .flatten()
             .zip(ret.output_weights.iter_mut().flatten())
         {
-            *r = (p * QA as f32) as i16;
+            *r = (p * QB as f32) as i16;
         }
 
         ret.output_bias = (net.output_bias * QAB as f32) as i16;

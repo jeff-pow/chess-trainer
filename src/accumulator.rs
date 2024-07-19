@@ -1,11 +1,8 @@
 use crate::{
-    dataloader::{STM, XSTM},
+    dataloader::{feature_extract, STM, XSTM},
     network::{activate, Network, HIDDEN_SIZE},
 };
-use bullet::{
-    format::ChessBoard,
-    inputs::{Chess768, InputType},
-};
+use bulletformat::ChessBoard;
 
 #[derive(Copy, Clone)]
 /// Struct to preserve the state of the first hidden layer of the network. Not really necessary
@@ -30,8 +27,8 @@ impl Accumulator {
 
     pub fn from_board(net: &Network, board: &ChessBoard) -> Self {
         let mut acc = Self::new(net);
-        let chess_768 = Chess768;
-        for (stm_idx, xstm_idx) in chess_768.feature_iter(board) {
+        for (piece, square) in board.into_iter() {
+            let (stm_idx, xstm_idx) = feature_extract(piece, square);
             acc.add(net, stm_idx, xstm_idx);
         }
         acc

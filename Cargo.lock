@@ -9,15 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96d30a06541fbafbc7f82ed10c06164cfbd2c401138f6addd8404629c4b16711"
 
 [[package]]
-name = "bullet_lib"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23ad644c8ad2e3b798dadbbb9ceabac7116e5c6b9f5188ff9ff1f5436816ae91"
-dependencies = [
- "bulletformat",
-]
-
-[[package]]
 name = "bulletformat"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -34,7 +25,7 @@ name = "chess-trainer"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
- "bullet_lib",
+ "bulletformat",
  "rand",
 ]
 

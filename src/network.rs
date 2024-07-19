@@ -2,18 +2,17 @@ use crate::{
     accumulator::Accumulator,
     dataloader::{Dataloader, FeatureSet, SCALE, STM, XSTM},
 };
-use bullet::{
-    format::ChessBoard,
-    inputs::{Chess768, InputType},
-};
+use bulletformat::ChessBoard;
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
-use std::{fs::File, io::Write, mem::transmute, sync::mpsc::sync_channel, time::Instant};
+use std::{
+    fs::File, io::Write, mem::transmute, str::FromStr, sync::mpsc::sync_channel, time::Instant,
+};
 
-pub const HIDDEN_SIZE: usize = 16;
+pub const HIDDEN_SIZE: usize = 32;
 pub const WEIGHT_CLIP: f32 = 1.98;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-#[repr(align(64))]
+#[repr(C, align(64))]
 pub struct Network {
     pub feature_weights: [[f32; HIDDEN_SIZE]; 768],
     pub feature_bias: [f32; HIDDEN_SIZE],
@@ -32,24 +31,20 @@ impl Network {
         for a in &mut feature_weights {
             for b in a {
                 *b = gen(768 * HIDDEN_SIZE);
-                *b *= -1.;
             }
         }
         let mut feature_bias = [0f32; HIDDEN_SIZE];
         for x in &mut feature_bias {
             *x = gen(HIDDEN_SIZE);
-            *x *= -1.;
         }
         let mut output_weights = [[0f32; HIDDEN_SIZE]; 2];
         for x in &mut output_weights {
             for y in x {
                 *y = gen(HIDDEN_SIZE * 2);
-                *y *= -1.;
             }
         }
 
-        let mut output_bias = gen(1);
-        output_bias *= -1.;
+        let output_bias = gen(1);
         Self {
             feature_weights,
             feature_bias,
@@ -102,12 +97,16 @@ impl Network {
             }
             println!();
             data_loader_handle.join().unwrap();
+            let start_pos = ChessBoard::from_str(
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 | 33 | 0.5",
+            )
+            .unwrap();
 
             println!(
                 "Epoch: {}, Error: {:.6}, Evaluation: {}",
                 epoch,
                 error / training_data.len() as f64,
-                self.evaluate(&training_data[0])
+                self.evaluate(&start_pos)
             );
         }
     }
@@ -172,8 +171,8 @@ impl Network {
         let mut output_weight_max = f32::MIN;
         let mut output_weight_min = f32::MAX;
         for &w in self.output_weights.iter().flatten() {
-            output_weight_min = w.min(feature_weight_min);
-            output_weight_max = w.max(feature_weight_max);
+            output_weight_min = w.min(output_weight_min);
+            output_weight_max = w.max(output_weight_max);
         }
 
         dbg!(
@@ -213,8 +212,11 @@ impl Network {
         //
         // Backwards Pass
         //
-        let output_delta = eval - board.blended_score;
-        *error += f64::from(output_delta.powi(2));
+        let sigmoid = 1.0 / (1.0 + (-eval).exp());
+        let diff = sigmoid - board.blended_score;
+        let output_delta = diff * sigmoid * (1.0 - sigmoid);
+
+        *error += f64::from(diff.powi(2));
         deltas.output_bias += output_delta;
 
         for i in 0..HIDDEN_SIZE {
@@ -254,11 +256,7 @@ impl Network {
 
     /// Feed forward evaluation including wdl scale
     pub fn evaluate(&self, board: &ChessBoard) -> f32 {
-        let mut acc = Accumulator::new(self);
-        let chess_768 = Chess768;
-        for (stm_idx, xstm_idx) in chess_768.feature_iter(board) {
-            acc.add(self, stm_idx, xstm_idx);
-        }
+        let acc = Accumulator::from_board(self, board);
         acc.flatten(self) * SCALE
     }
 }

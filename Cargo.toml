@@ -5,5 +5,6 @@ edition = "2021"
 
 [dependencies]
 arrayvec = "0.7.4"
-bullet = { package = "bullet_lib", version = "1.0.0" }
+# bullet = { package = "bullet_lib", version = "1.0.0" }
+bulletformat = "1.6.0"
 rand = "0.8.5"
