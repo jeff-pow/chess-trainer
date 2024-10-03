@@ -3,12 +3,12 @@ use crate::{
     dataloader::{Dataloader, FeatureSet, SCALE, STM, XSTM},
 };
 use bulletformat::ChessBoard;
-use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{
     fs::File, io::Write, mem::transmute, str::FromStr, sync::mpsc::sync_channel, time::Instant,
 };
 
-pub const HIDDEN_SIZE: usize = 32;
+pub const HIDDEN_SIZE: usize = 128;
 pub const WEIGHT_CLIP: f32 = 1.98;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -33,10 +33,9 @@ impl Network {
                 *b = gen(768 * HIDDEN_SIZE);
             }
         }
-        let mut feature_bias = [0f32; HIDDEN_SIZE];
-        for x in &mut feature_bias {
-            *x = gen(HIDDEN_SIZE);
-        }
+
+        let feature_bias = [0f32; HIDDEN_SIZE];
+
         let mut output_weights = [[0f32; HIDDEN_SIZE]; 2];
         for x in &mut output_weights {
             for y in x {
@@ -44,7 +43,7 @@ impl Network {
             }
         }
 
-        let output_bias = gen(1);
+        let output_bias = 0.;
         Self {
             feature_weights,
             feature_bias,
@@ -64,51 +63,50 @@ impl Network {
 
     pub fn train(
         &mut self,
-        training_data: &mut [ChessBoard],
-        epochs: usize,
+        superbatch_len: usize,
+        superbatches: usize,
         mini_batch_size: usize,
         mut lr: f32,
     ) {
-        let mut rng: StdRng = SeedableRng::seed_from_u64(0xBEEF);
-        for epoch in 0..epochs {
-            if epoch % 10 == 0 && epoch != 0 {
-                lr *= 0.7;
+        let num_mini_batches = superbatch_len * superbatches / mini_batch_size;
+        let mini_batches_per_superbatch = superbatch_len / mini_batch_size;
+        let loader = Dataloader::new();
+        let (sender, receiver) = sync_channel::<Vec<FeatureSet>>(256);
+        let data_loader_handle = loader.run(sender.clone(), mini_batch_size, num_mini_batches);
+        for superbatch in 0..superbatches {
+            if superbatch % 10 == 0 && superbatch != 0 {
+                lr *= 0.5;
                 let mut out = File::create("./network-checkpoint.bin").unwrap();
                 let buf: [u8; size_of::<Network>()] = unsafe { transmute(*self) };
                 let _ = out.write(&buf);
             }
-            training_data.shuffle(&mut rng);
 
-            let (sender, receiver) = sync_channel::<Vec<FeatureSet>>(256);
-            let loader = Dataloader::new(1, training_data.to_vec());
-            let num_chunks = training_data.len() / mini_batch_size;
             let mut error = 0.;
-            let data_loader_handle = loader.run(sender.clone(), mini_batch_size, num_chunks);
 
             let start = Instant::now();
-            for count in 0..num_chunks {
+            for count in 0..mini_batches_per_superbatch {
                 let data = receiver.recv().unwrap();
                 print!(
-                    "\rEpoch {epoch} {:.1}% finished. {:.0} pos / sec",
-                    count as f32 * mini_batch_size as f32 / training_data.len() as f32 * 100.,
+                    "\rSuperbatch {superbatch} {:.1}% finished. {:.0} pos / sec",
+                    count as f32 * mini_batch_size as f32 / superbatch_len as f32 * 100.,
                     count as f32 * mini_batch_size as f32 / start.elapsed().as_secs_f32()
                 );
                 self.update_mini_batch(&data, lr, &mut error);
             }
             println!();
-            data_loader_handle.join().unwrap();
+
             let start_pos = ChessBoard::from_str(
                 "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 | 33 | 0.5",
             )
             .unwrap();
-
             println!(
-                "Epoch: {}, Error: {:.6}, Evaluation: {}",
-                epoch,
-                error / training_data.len() as f64,
+                "Superbatch: {}, Error: {:.6}, Evaluation: {}",
+                superbatch,
+                error / superbatch_len as f64,
                 self.evaluate(&start_pos)
             );
         }
+        data_loader_handle.join().unwrap();
     }
 
     fn update_mini_batch(&mut self, batch: &[FeatureSet], lr: f32, error: &mut f64) {
@@ -118,17 +116,38 @@ impl Network {
         });
 
         self.apply_gradients(&unified_changes, lr, batch.len() as f32);
+
+        unified_changes
+            .feature_weights
+            .iter_mut()
+            .flatten()
+            .for_each(|x| {
+                *x *= lr / batch.len() as f32;
+            });
+        unified_changes.feature_bias.iter_mut().for_each(|x| {
+            *x *= lr / batch.len() as f32;
+        });
+        unified_changes
+            .output_weights
+            .iter_mut()
+            .flatten()
+            .for_each(|x| {
+                *x *= lr / batch.len() as f32;
+            });
+        unified_changes.output_bias *= lr / batch.len() as f32;
+
+        // unified_changes.print_max_and_min();
     }
 
     fn apply_gradients(&mut self, changes: &Network, lr: f32, batch_size: f32) {
-        let lr_batch = lr / batch_size;
+        let batch_lr = lr / batch_size;
 
         self.feature_weights
             .iter_mut()
             .flatten()
             .zip(changes.feature_weights.iter().flatten())
             .for_each(|(w, nw)| {
-                *w -= lr_batch * nw;
+                *w -= batch_lr * nw;
                 *w = w.clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
             });
 
@@ -136,8 +155,8 @@ impl Network {
             .iter_mut()
             .zip(changes.feature_bias.iter())
             .for_each(|(b, nb)| {
-                *b -= lr_batch * nb;
-                *b = b.clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
+                *b -= batch_lr * nb;
+                // *b = b.clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
             });
 
         self.output_weights
@@ -145,12 +164,12 @@ impl Network {
             .flatten()
             .zip(changes.output_weights.iter().flatten())
             .for_each(|(w, nw)| {
-                *w -= lr_batch * nw;
+                *w -= batch_lr * nw;
                 *w = w.clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
             });
 
-        self.output_bias -= lr_batch * changes.output_bias;
-        self.output_bias = self.output_bias.clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
+        self.output_bias -= batch_lr * changes.output_bias;
+        // self.output_bias = self.output_bias.clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
     }
 
     pub fn print_max_and_min(&self) {
@@ -212,9 +231,11 @@ impl Network {
         //
         // Backwards Pass
         //
+
         let sigmoid = 1.0 / (1.0 + (-eval).exp());
         let diff = sigmoid - board.blended_score;
         let output_delta = diff * sigmoid * (1.0 - sigmoid);
+        // Try https://github.com/official-stockfish/nnue-pytorch/blob/master/docs/nnue.md#mean-squared-error-mse
 
         *error += f64::from(diff.powi(2));
         deltas.output_bias += output_delta;

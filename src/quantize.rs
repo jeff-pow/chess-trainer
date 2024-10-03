@@ -1,10 +1,12 @@
 use crate::network::{Network, HIDDEN_SIZE};
+use std::{fs::File, io::Write, mem::transmute};
 
 const QA: i32 = 255;
 const QB: i32 = 64;
 const QAB: i32 = QA * QB;
 
 #[repr(C, align(64))]
+#[derive(Clone, Copy)]
 pub struct QuantizedNetwork {
     pub feature_weights: [[i16; HIDDEN_SIZE]; 768],
     pub feature_bias: [i16; HIDDEN_SIZE],
@@ -46,5 +48,11 @@ impl QuantizedNetwork {
         ret.output_bias = (net.output_bias * QAB as f32) as i16;
 
         ret
+    }
+
+    pub fn write(&self, file_name: &str) {
+        let mut out = File::create(file_name).unwrap();
+        let buf: [u8; size_of::<QuantizedNetwork>()] = unsafe { transmute(*self) };
+        let _ = out.write(&buf);
     }
 }

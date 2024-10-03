@@ -8,3 +8,13 @@ arrayvec = "0.7.4"
 # bullet = { package = "bullet_lib", version = "1.0.0" }
 bulletformat = "1.6.0"
 rand = "0.8.5"
+
+
+[profile.release]
+codegen-units = 1
+opt-level = 3
+lto = true
+strip = true
+panic = "abort"
+incremental = true
+

@@ -1,6 +1,9 @@
 use arrayvec::ArrayVec;
 use bulletformat::{BulletFormat, ChessBoard};
 use std::{
+    fs::File,
+    io::{self, Read, Seek},
+    slice::from_raw_parts,
     sync::mpsc::SyncSender,
     thread::{self, JoinHandle},
 };
@@ -9,7 +12,7 @@ pub const XSTM: usize = 1;
 
 pub const RECIPROCAL_SCALE: f32 = 1. / SCALE;
 pub const SCALE: f32 = 400.;
-pub const ALPHA: f32 = 0.10;
+pub const ALPHA: f32 = 0.90;
 
 #[derive(Clone, Default, Debug)]
 pub struct FeatureSet {
@@ -17,17 +20,11 @@ pub struct FeatureSet {
     pub blended_score: f32,
 }
 
-pub struct Dataloader {
-    raw_data: Vec<ChessBoard>,
-    _threads: usize,
-}
+pub struct Dataloader {}
 
 impl Dataloader {
-    pub fn new(threads: usize, raw_data: Vec<ChessBoard>) -> Self {
-        Self {
-            raw_data,
-            _threads: threads,
-        }
+    pub fn new() -> Self {
+        Self {}
     }
 
     pub fn run(
@@ -36,26 +33,43 @@ impl Dataloader {
         mini_batch_size: usize,
         num_batches: usize,
     ) -> JoinHandle<()> {
-        let c = self.raw_data.clone();
         thread::spawn(move || {
-            let mut iter = c.iter();
-
-            for _ in 0..num_batches {
-                let vec = iter
-                    .by_ref()
-                    .take(mini_batch_size)
-                    .map(|board| {
-                        let mut features = FeatureSet::default();
-                        for (piece, square) in board.into_iter() {
-                            let (stm_idx, xstm_idx) = feature_extract(piece, square);
-                            features.features[STM].push(stm_idx);
-                            features.features[XSTM].push(xstm_idx);
+            let mut file_name = File::open("/home/jeff/chess-trainer/shuffled.bin").unwrap();
+            let mut buffer = vec![0u8; mini_batch_size * size_of::<ChessBoard>()];
+            let mut count = 0;
+            while count < num_batches {
+                match file_name.read_exact(&mut buffer) {
+                    Ok(_) => {
+                        let slice = unsafe {
+                            from_raw_parts(buffer.as_ptr() as *const ChessBoard, mini_batch_size)
+                        };
+                        assert_eq!(mini_batch_size, slice.len());
+                        let vec = slice
+                            .iter()
+                            .map(|board| {
+                                let mut features = FeatureSet::default();
+                                for (piece, square) in board.into_iter() {
+                                    let (stm_idx, xstm_idx) = feature_extract(piece, square);
+                                    features.features[STM].push(stm_idx);
+                                    features.features[XSTM].push(xstm_idx);
+                                }
+                                features.blended_score =
+                                    board.blended_result(ALPHA, RECIPROCAL_SCALE);
+                                features
+                            })
+                            .collect::<Vec<_>>();
+                        count += 1;
+                        sender.send(vec).unwrap();
+                    }
+                    Err(e) => {
+                        if e.kind() == io::ErrorKind::UnexpectedEof {
+                            println!("Seeked");
+                            file_name.seek(io::SeekFrom::Start(0)).unwrap();
+                        } else {
+                            panic!("Could not rewind data file.");
                         }
-                        features.blended_score = board.blended_result(ALPHA, RECIPROCAL_SCALE);
-                        features
-                    })
-                    .collect::<Vec<_>>();
-                sender.send(vec).unwrap();
+                    }
+                }
             }
         })
     }
